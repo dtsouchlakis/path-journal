@@ -5,14 +5,13 @@ import {
   IonApp,
   IonButton,
   IonContent,
-  IonDatetime,
   IonIcon,
   IonModal,
-  IonPopover,
   IonToast,
 } from '@ionic/react';
 import {
   add,
+  analyticsOutline,
   cameraOutline,
   checkmarkCircle,
   chevronDown,
@@ -20,8 +19,7 @@ import {
   createOutline,
   ellipsisHorizontal,
   fastFoodOutline,
-  happyOutline,
-  imageOutline,
+  pauseCircleOutline,
   personAddOutline,
   personCircleOutline,
   restaurantOutline,
@@ -30,6 +28,7 @@ import {
 import { loadState, saveState } from './storage';
 
 type PathStatus = 'on' | 'off';
+type PortionSize = 'Small' | 'Medium' | 'Large';
 
 type JournalEntry = {
   id: string;
@@ -40,6 +39,12 @@ type JournalEntry = {
   mood: string;
   place: string;
   after: string;
+  hungerBefore: number;
+  fullnessAfter: number;
+  portion: PortionSize;
+  hadSeconds: boolean;
+  contexts: string[];
+  duration: string;
 };
 
 type JournalUser = {
@@ -58,6 +63,10 @@ type EntryDraft = Omit<JournalEntry, 'id'>;
 const moods = ['Calm', 'Happy', 'Stressed', 'Bored', 'Sad', 'Celebrating', 'Tired'];
 const places = ['Sitting at a table', 'On the sofa', 'Standing', 'At my desk', 'In the car', 'Out with others'];
 const afterFeelings = ['Satisfied', 'Energized', 'Comforted', 'Still hungry', 'Too full', 'Embarrassed', 'Neutral'];
+const portions: PortionSize[] = ['Small', 'Medium', 'Large'];
+const eatingContexts = ['Watching a screen', 'Eating from a package', 'Eating alone', 'Eating with others'];
+const mealDurations = ['Under 10 min', '10–20 min', '20+ min'];
+const pauseReasons = ['Physically hungry', 'Stressed', 'Bored', 'Tired', 'Thirsty', 'Celebrating'];
 
 const nowLocalIso = () => {
   const now = new Date();
@@ -73,6 +82,18 @@ const emptyDraft = (): EntryDraft => ({
   mood: 'Calm',
   place: 'Sitting at a table',
   after: 'Satisfied',
+  hungerBefore: 5,
+  fullnessAfter: 7,
+  portion: 'Medium',
+  hadSeconds: false,
+  contexts: [],
+  duration: '10–20 min',
+});
+
+const normalizeEntry = (entry: JournalEntry): JournalEntry => ({
+  ...emptyDraft(),
+  ...entry,
+  contexts: entry.contexts ?? [],
 });
 
 const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -99,11 +120,22 @@ const initials = (name: string) =>
     .slice(0, 2)
     .toUpperCase();
 
+const mostFrequent = (values: string[]) => {
+  if (!values.length) return null;
+  const counts = values.reduce<Record<string, number>>((result, value) => {
+    result[value] = (result[value] ?? 0) + 1;
+    return result;
+  }, {});
+  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+};
+
 function App() {
   const [state, setState] = useState<StoredState>({ activeUserId: null, users: [] });
   const [hydrated, setHydrated] = useState(false);
   const [showUserPicker, setShowUserPicker] = useState(false);
   const [showEntry, setShowEntry] = useState(false);
+  const [showPause, setShowPause] = useState(false);
+  const [showPatterns, setShowPatterns] = useState(false);
   const [showUserForm, setShowUserForm] = useState(false);
   const [userName, setUserName] = useState('');
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
@@ -113,11 +145,18 @@ function App() {
   const [deleteEntryId, setDeleteEntryId] = useState<string | null>(null);
   const [deleteUserId, setDeleteUserId] = useState<string | null>(null);
   const [toast, setToast] = useState('');
+  const [pauseReason, setPauseReason] = useState('Physically hungry');
+  const [pauseEndsAt, setPauseEndsAt] = useState<number | null>(null);
+  const [pauseRemaining, setPauseRemaining] = useState(600);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadState<StoredState>({ activeUserId: null, users: [] }).then((stored) => {
-      setState(stored);
+      const normalized = {
+        ...stored,
+        users: stored.users.map((user) => ({ ...user, entries: user.entries.map(normalizeEntry) })),
+      };
+      setState(normalized);
       setShowUserForm(stored.users.length === 0);
       setHydrated(true);
     });
@@ -127,6 +166,18 @@ function App() {
     if (!hydrated) return;
     saveState(state).catch(() => setToast('Could not save changes on this device'));
   }, [state, hydrated]);
+
+  useEffect(() => {
+    if (!pauseEndsAt) return;
+    const updateRemaining = () => {
+      const remaining = Math.max(0, Math.ceil((pauseEndsAt - Date.now()) / 1000));
+      setPauseRemaining(remaining);
+      if (remaining === 0) setPauseEndsAt(null);
+    };
+    updateRemaining();
+    const timer = window.setInterval(updateRemaining, 1000);
+    return () => window.clearInterval(timer);
+  }, [pauseEndsAt]);
 
   const activeUser = state.users.find((user) => user.id === state.activeUserId) ?? state.users[0] ?? null;
 
@@ -145,6 +196,28 @@ function App() {
         groups.set(key, [...(groups.get(key) ?? []), entry]);
       });
     return [...groups.entries()];
+  }, [activeUser]);
+
+  const weeklyPatterns = useMemo(() => {
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const entries = (activeUser?.entries ?? []).filter((entry) => +new Date(entry.eatenAt) >= cutoff);
+    const unplanned = entries.filter((entry) => entry.path === 'off');
+    const trigger = mostFrequent(unplanned.map((entry) => entry.mood));
+    const context = mostFrequent(unplanned.flatMap((entry) => entry.contexts));
+    const averageHunger = entries.length
+      ? entries.reduce((sum, entry) => sum + entry.hungerBefore, 0) / entries.length
+      : 0;
+    const satisfied = entries.filter((entry) => ['Satisfied', 'Energized', 'Comforted'].includes(entry.after)).length;
+    const quickMeals = entries.filter((entry) => entry.duration === 'Under 10 min').length;
+    return {
+      entries,
+      unplanned,
+      trigger,
+      context,
+      averageHunger,
+      satisfied,
+      quickMeals,
+    };
   }, [activeUser]);
 
   const updateActiveUser = (transform: (user: JournalUser) => JournalUser) => {
@@ -199,9 +272,22 @@ function App() {
   };
 
   const openNewEntry = () => {
+    setPauseReason('Physically hungry');
+    setPauseEndsAt(null);
+    setPauseRemaining(600);
+    setShowPause(true);
+  };
+
+  const continueToNewEntry = () => {
     setEditingEntryId(null);
     setDraft(emptyDraft());
+    setShowPause(false);
     setShowEntry(true);
+  };
+
+  const startPause = () => {
+    setPauseRemaining(600);
+    setPauseEndsAt(Date.now() + 10 * 60 * 1000);
   };
 
   const openEditEntry = (entry: JournalEntry) => {
@@ -214,6 +300,12 @@ function App() {
       mood: entry.mood,
       place: entry.place,
       after: entry.after,
+      hungerBefore: entry.hungerBefore ?? 5,
+      fullnessAfter: entry.fullnessAfter ?? 7,
+      portion: entry.portion ?? 'Medium',
+      hadSeconds: entry.hadSeconds ?? false,
+      contexts: entry.contexts ?? [],
+      duration: entry.duration ?? '10–20 min',
     });
     setEntryMenuId(null);
     setShowEntry(true);
@@ -272,6 +364,18 @@ function App() {
     image.src = objectUrl;
   };
 
+  const pauseSuggestion: Record<string, string> = {
+    'Physically hungry': 'A planned, satisfying meal or snack may be exactly what you need.',
+    Stressed: 'Try five slow breaths or a short walk, then check whether the urge changed.',
+    Bored: 'Change rooms or do one small task before deciding what you want.',
+    Tired: 'Rest, tea, or a regular meal may help more than grazing.',
+    Thirsty: 'Have a glass of water, then check in with your hunger again.',
+    Celebrating: 'Enjoying food is allowed. Decide what would feel satisfying, not restrictive.',
+  };
+
+  const formatCountdown = (seconds: number) =>
+    `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+
   if (!hydrated) {
     return <IonApp><div className="launch-screen"><span className="welcome-mark">✦</span><strong>Path</strong></div></IonApp>;
   }
@@ -306,8 +410,12 @@ function App() {
               <p className="eyebrow">Your food story</p>
               <h1>{groupedEntries.length ? 'One choice at a time.' : 'Start where you are.'}</h1>
             </div>
-            <button className="quiet-menu" aria-label="User options" onClick={() => setShowUserPicker(true)}>
-              <IonIcon icon={ellipsisHorizontal} />
+            <button
+              className="quiet-menu"
+              aria-label={activeUser?.entries.length ? 'View weekly patterns' : 'User options'}
+              onClick={() => activeUser?.entries.length ? setShowPatterns(true) : setShowUserPicker(true)}
+            >
+              <IonIcon icon={activeUser?.entries.length ? analyticsOutline : ellipsisHorizontal} />
             </button>
           </section>
 
@@ -326,40 +434,60 @@ function App() {
               </IonButton>
             </section>
           ) : (
-            <div className="timeline">
-              {groupedEntries.map(([day, entries]) => (
-                <section className="day-group" key={day}>
-                  <div className="day-label"><span>{day}</span><i /></div>
-                  {entries.map((entry) => (
-                    <article className="entry-row" key={entry.id}>
-                      <div className={`rail-dot ${entry.path}`}><IonIcon icon={restaurantOutline} /></div>
-                      <div className="entry-time">
-                        <strong>{formatTime(entry.eatenAt)}</strong>
-                        <span>{entry.path === 'on' ? 'On path' : 'Off path'}</span>
-                      </div>
-                      <div className="entry-card">
-                        {entry.image ? <img src={entry.image} alt={entry.description || 'Food journal entry'} /> : (
-                          <div className="text-entry-art"><IonIcon icon={fastFoodOutline} /></div>
-                        )}
-                        <div className="entry-body">
-                          <div className="entry-title-row">
-                            <h2>{entry.description || 'Photo entry'}</h2>
-                            <button aria-label="Entry actions" id={`entry-${entry.id}`} onClick={() => setEntryMenuId(entry.id)}>
-                              <IonIcon icon={ellipsisHorizontal} />
-                            </button>
-                          </div>
-                          <div className="entry-tags">
-                            <span>☺ {entry.mood}</span>
-                            <span>⌂ {entry.place}</span>
-                            <span>♡ {entry.after}</span>
+            <>
+              <button className="pattern-card" onClick={() => setShowPatterns(true)}>
+                <span className="pattern-icon"><IonIcon icon={analyticsOutline} /></span>
+                <span>
+                  <small>This week, on your device</small>
+                  <strong>
+                    {weeklyPatterns.entries.length} {weeklyPatterns.entries.length === 1 ? 'entry' : 'entries'}
+                    {weeklyPatterns.trigger ? ` · ${weeklyPatterns.trigger} is a common trigger` : ' · keep noticing'}
+                  </strong>
+                </span>
+                <span className="pattern-arrow">›</span>
+              </button>
+              <div className="timeline">
+                {groupedEntries.map(([day, entries]) => (
+                  <section className="day-group" key={day}>
+                    <div className="day-label"><span>{day}</span><i /></div>
+                    {entries.map((entry) => (
+                      <article className="entry-row" key={entry.id}>
+                        <div className={`rail-dot ${entry.path}`}><IonIcon icon={restaurantOutline} /></div>
+                        <div className="entry-time">
+                          <strong>{formatTime(entry.eatenAt)}</strong>
+                          <span>{entry.path === 'on' ? 'Aligned' : 'Unplanned'}</span>
+                        </div>
+                        <div className="entry-card">
+                          {entry.image ? <img src={entry.image} alt={entry.description || 'Food journal entry'} /> : (
+                            <div className="text-entry-art"><IonIcon icon={fastFoodOutline} /></div>
+                          )}
+                          <div className="entry-body">
+                            <div className="entry-title-row">
+                              <h2>{entry.description || 'Photo entry'}</h2>
+                              <button aria-label="Entry actions" id={`entry-${entry.id}`} onClick={() => setEntryMenuId(entry.id)}>
+                                <IonIcon icon={ellipsisHorizontal} />
+                              </button>
+                            </div>
+                            <div className="entry-reflection">
+                              <span><b>{entry.hungerBefore}</b> hunger</span>
+                              <i>→</i>
+                              <span><b>{entry.fullnessAfter}</b> fullness</span>
+                            </div>
+                            <div className="entry-tags">
+                              <span>{entry.mood}</span>
+                              <span>{entry.portion} portion{entry.hadSeconds ? ' + seconds' : ''}</span>
+                              <span>{entry.duration}</span>
+                              <span>{entry.place}</span>
+                              <span>{entry.after}</span>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </article>
-                  ))}
-                </section>
-              ))}
-            </div>
+                      </article>
+                    ))}
+                  </section>
+                ))}
+              </div>
+            </>
           )}
           <div className="bottom-space" />
         </main>
@@ -399,15 +527,101 @@ function App() {
               <label><span>When</span><input type="datetime-local" value={draft.eatenAt} onChange={(event) => setDraft({ ...draft, eatenAt: event.target.value })} /></label>
             </div>
 
-            <label className="field-label">Was this aligned with your goals?</label>
+            <ScaleField title="How hungry were you before?" low="Not hungry" high="Very hungry" value={draft.hungerBefore} onChange={(hungerBefore) => setDraft({ ...draft, hungerBefore })} />
+
+            <ChoiceField title="Approximate portion" icon="" value={draft.portion} values={portions} onChange={(portion) => setDraft({ ...draft, portion: portion as PortionSize })} />
+
+            <label className="field-label">Did you have another serving?</label>
             <div className="choice-row two">
-              <button className={draft.path === 'on' ? 'selected on' : ''} onClick={() => setDraft({ ...draft, path: 'on' })}><IonIcon icon={checkmarkCircle} /> On path</button>
-              <button className={draft.path === 'off' ? 'selected off' : ''} onClick={() => setDraft({ ...draft, path: 'off' })}>○ Off path</button>
+              <button className={!draft.hadSeconds ? 'selected neutral' : ''} onClick={() => setDraft({ ...draft, hadSeconds: false })}>No seconds</button>
+              <button className={draft.hadSeconds ? 'selected neutral' : ''} onClick={() => setDraft({ ...draft, hadSeconds: true })}>Had seconds</button>
             </div>
 
-            <ChoiceField title="What mood led to it?" icon="☺" value={draft.mood} values={moods} onChange={(mood) => setDraft({ ...draft, mood })} />
-            <ChoiceField title="Where / how did you eat?" icon="⌂" value={draft.place} values={places} onChange={(place) => setDraft({ ...draft, place })} />
-            <ChoiceField title="How did you feel after?" icon="♡" value={draft.after} values={afterFeelings} onChange={(after) => setDraft({ ...draft, after })} />
+            <label className="field-label">Did this feel aligned with your intention?</label>
+            <div className="choice-row two">
+              <button className={draft.path === 'on' ? 'selected on' : ''} onClick={() => setDraft({ ...draft, path: 'on' })}><IonIcon icon={checkmarkCircle} /> Aligned</button>
+              <button className={draft.path === 'off' ? 'selected off' : ''} onClick={() => setDraft({ ...draft, path: 'off' })}>Unplanned</button>
+            </div>
+
+            <ChoiceField title="What mood led to it?" icon="" value={draft.mood} values={moods} onChange={(mood) => setDraft({ ...draft, mood })} />
+            <MultiChoiceField title="What was happening while you ate?" values={eatingContexts} selected={draft.contexts} onChange={(contexts) => setDraft({ ...draft, contexts })} />
+            <ChoiceField title="Where / how did you eat?" icon="" value={draft.place} values={places} onChange={(place) => setDraft({ ...draft, place })} />
+            <ChoiceField title="Roughly how long did it take?" icon="" value={draft.duration} values={mealDurations} onChange={(duration) => setDraft({ ...draft, duration })} />
+            <ChoiceField title="How did you feel after?" icon="" value={draft.after} values={afterFeelings} onChange={(after) => setDraft({ ...draft, after })} />
+            <ScaleField title="How full were you afterward?" low="Still hungry" high="Very full" value={draft.fullnessAfter} onChange={(fullnessAfter) => setDraft({ ...draft, fullnessAfter })} />
+          </div>
+        </div>
+      </IonModal>
+
+      <IonModal isOpen={showPause} onDidDismiss={() => { setShowPause(false); setPauseEndsAt(null); }} breakpoints={[0, 0.72]} initialBreakpoint={0.72}>
+        <div className="sheet pause-sheet">
+          <div className="sheet-handle" />
+          <div className="pause-heading">
+            <span className="pause-symbol"><IonIcon icon={pauseCircleOutline} /></span>
+            <p className="eyebrow">A quick check-in</p>
+            <h2>What do you need right now?</h2>
+            <p>This is not a test. You can pause, or log your food immediately.</p>
+          </div>
+          <div className="pause-body">
+            <div className="chip-row wrap">
+              {pauseReasons.map((reason) => (
+                <button key={reason} className={pauseReason === reason ? 'selected' : ''} onClick={() => setPauseReason(reason)}>{reason}</button>
+              ))}
+            </div>
+            <div className="pause-suggestion">{pauseSuggestion[pauseReason]}</div>
+            {pauseEndsAt ? (
+              <div className="pause-timer">
+                <small>Take a breath and check back in</small>
+                <strong>{formatCountdown(pauseRemaining)}</strong>
+                <button onClick={continueToNewEntry}>Continue now</button>
+              </div>
+            ) : pauseRemaining === 0 ? (
+              <div className="pause-complete">
+                <IonIcon icon={checkmarkCircle} />
+                <strong>Pause complete</strong>
+                <span>Has the urge or hunger changed?</span>
+                <IonButton className="primary-button" onClick={continueToNewEntry}>Continue to journal</IonButton>
+              </div>
+            ) : (
+              <div className="pause-actions">
+                <IonButton className="primary-button" expand="block" onClick={startPause}>Take a 10-minute pause</IonButton>
+                <button onClick={continueToNewEntry}>Log it now</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </IonModal>
+
+      <IonModal isOpen={showPatterns} onDidDismiss={() => setShowPatterns(false)} breakpoints={[0, 0.78]} initialBreakpoint={0.78}>
+        <div className="sheet patterns-sheet">
+          <div className="sheet-handle" />
+          <div className="patterns-header">
+            <span className="pattern-icon large"><IonIcon icon={analyticsOutline} /></span>
+            <p className="eyebrow">Last seven days</p>
+            <h2>Patterns, not grades.</h2>
+            <p>These observations are calculated only from {activeUser?.name}'s local journal.</p>
+          </div>
+          <div className="insight-list">
+            <div className="insight-card">
+              <small>Check-ins</small>
+              <strong>{weeklyPatterns.entries.length}</strong>
+              <p>{weeklyPatterns.unplanned.length} were marked unplanned. That is information—not failure.</p>
+            </div>
+            <div className="insight-card">
+              <small>Average hunger before eating</small>
+              <strong>{weeklyPatterns.entries.length ? weeklyPatterns.averageHunger.toFixed(1) : '–'} / 10</strong>
+              <p>{weeklyPatterns.averageHunger >= 8 ? 'Very high hunger can make portions harder to judge.' : 'Notice which hunger level leads to a satisfying meal.'}</p>
+            </div>
+            <div className="insight-card">
+              <small>Most common unplanned trigger</small>
+              <strong>{weeklyPatterns.trigger ?? 'Not enough data yet'}</strong>
+              <p>{weeklyPatterns.context ? `${weeklyPatterns.context} was the most common context.` : 'Keep logging context to reveal a pattern.'}</p>
+            </div>
+            <div className="insight-card">
+              <small>Satisfaction</small>
+              <strong>{weeklyPatterns.satisfied} of {weeklyPatterns.entries.length}</strong>
+              <p>{weeklyPatterns.quickMeals ? `${weeklyPatterns.quickMeals} quick ${weeklyPatterns.quickMeals === 1 ? 'meal was' : 'meals were'} under 10 minutes.` : 'No meals were marked under 10 minutes.'}</p>
+            </div>
           </div>
         </div>
       </IonModal>
@@ -466,8 +680,32 @@ function ChoiceField({ title, icon, value, values, onChange }: { title: string; 
     <div className="choice-field">
       <label className="field-label">{title}</label>
       <div className="chip-row">
-        {values.map((option) => <button key={option} className={value === option ? 'selected' : ''} onClick={() => onChange(option)}><span>{icon}</span>{option}</button>)}
+        {values.map((option) => <button key={option} className={value === option ? 'selected' : ''} onClick={() => onChange(option)}>{icon && <span>{icon}</span>}{option}</button>)}
       </div>
+    </div>
+  );
+}
+
+function MultiChoiceField({ title, values, selected, onChange }: { title: string; values: string[]; selected: string[]; onChange: (value: string[]) => void }) {
+  const toggle = (value: string) => {
+    onChange(selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value]);
+  };
+  return (
+    <div className="choice-field">
+      <label className="field-label">{title} <small>Select any</small></label>
+      <div className="chip-row wrap">
+        {values.map((option) => <button key={option} className={selected.includes(option) ? 'selected' : ''} onClick={() => toggle(option)}>{option}</button>)}
+      </div>
+    </div>
+  );
+}
+
+function ScaleField({ title, low, high, value, onChange }: { title: string; low: string; high: string; value: number; onChange: (value: number) => void }) {
+  return (
+    <div className="scale-field">
+      <div className="scale-heading"><label className="field-label">{title}</label><strong>{value}</strong></div>
+      <input aria-label={title} type="range" min="1" max="10" step="1" value={value} onChange={(event) => onChange(Number(event.target.value))} />
+      <div className="scale-labels"><span>1 · {low}</span><span>{high} · 10</span></div>
     </div>
   );
 }
