@@ -1,3 +1,4 @@
+// Journal records live in IndexedDB so larger base64 photos do not hit localStorage limits.
 const DB_NAME = 'path-journal-db';
 const STORE_NAME = 'state';
 const STATE_KEY = 'current';

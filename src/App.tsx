@@ -9,6 +9,9 @@ import {
   IonModal,
   IonToast,
 } from '@ionic/react';
+import { Camera, CameraDirection, EncodingType, MediaTypeSelection, type MediaResult } from '@capacitor/camera';
+import { Capacitor } from '@capacitor/core';
+import heic2any from 'heic2any';
 import {
   add,
   analyticsOutline,
@@ -19,6 +22,7 @@ import {
   createOutline,
   ellipsisHorizontal,
   fastFoodOutline,
+  imageOutline,
   pauseCircleOutline,
   personAddOutline,
   personCircleOutline,
@@ -141,6 +145,8 @@ function App() {
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
   const [draft, setDraft] = useState<EntryDraft>(emptyDraft);
+  const [entryDraftActive, setEntryDraftActive] = useState(false);
+  const [processingPhoto, setProcessingPhoto] = useState(false);
   const [entryMenuId, setEntryMenuId] = useState<string | null>(null);
   const [deleteEntryId, setDeleteEntryId] = useState<string | null>(null);
   const [deleteUserId, setDeleteUserId] = useState<string | null>(null);
@@ -148,8 +154,10 @@ function App() {
   const [pauseReason, setPauseReason] = useState('Physically hungry');
   const [pauseEndsAt, setPauseEndsAt] = useState<number | null>(null);
   const [pauseRemaining, setPauseRemaining] = useState(600);
-  const fileInput = useRef<HTMLInputElement>(null);
+  const cameraInput = useRef<HTMLInputElement>(null);
+  const galleryInput = useRef<HTMLInputElement>(null);
 
+  // Hydrate once, then normalize older entries as fields are added in newer releases.
   useEffect(() => {
     loadState<StoredState>({ activeUserId: null, users: [] }).then((stored) => {
       const normalized = {
@@ -162,11 +170,13 @@ function App() {
     });
   }, []);
 
+  // IndexedDB is the app's only source of persistence; no journal data leaves the device.
   useEffect(() => {
     if (!hydrated) return;
     saveState(state).catch(() => setToast('Could not save changes on this device'));
   }, [state, hydrated]);
 
+  // The pause deadline is stored as an absolute time so timer drift does not accumulate.
   useEffect(() => {
     if (!pauseEndsAt) return;
     const updateRemaining = () => {
@@ -272,6 +282,11 @@ function App() {
   };
 
   const openNewEntry = () => {
+    // A dismissed/collapsed sheet keeps its draft and reopens exactly where the user left it.
+    if (entryDraftActive) {
+      setShowEntry(true);
+      return;
+    }
     setPauseReason('Physically hungry');
     setPauseEndsAt(null);
     setPauseRemaining(600);
@@ -279,8 +294,11 @@ function App() {
   };
 
   const continueToNewEntry = () => {
-    setEditingEntryId(null);
-    setDraft(emptyDraft());
+    if (!entryDraftActive) {
+      setEditingEntryId(null);
+      setDraft(emptyDraft());
+      setEntryDraftActive(true);
+    }
     setShowPause(false);
     setShowEntry(true);
   };
@@ -307,8 +325,16 @@ function App() {
       contexts: entry.contexts ?? [],
       duration: entry.duration ?? '10–20 min',
     });
+    setEntryDraftActive(true);
     setEntryMenuId(null);
     setShowEntry(true);
+  };
+
+  const cancelEntry = () => {
+    setEntryDraftActive(false);
+    setEditingEntryId(null);
+    setDraft(emptyDraft());
+    setShowEntry(false);
   };
 
   const saveEntry = () => {
@@ -327,6 +353,9 @@ function App() {
       }
       return { ...user, entries: [...user.entries, { ...draft, description: draft.description.trim(), id: uid() }] };
     });
+    setEntryDraftActive(false);
+    setEditingEntryId(null);
+    setDraft(emptyDraft());
     setShowEntry(false);
     setToast(editingEntryId ? 'Entry updated' : 'Added to your journal');
   };
@@ -338,30 +367,109 @@ function App() {
     setToast('Entry deleted');
   };
 
-  const readImage = (file?: File) => {
-    if (!file) return;
-    if (file.size > 15 * 1024 * 1024) {
+  const isHeifImage = (blob: Blob, name = '', format = '') =>
+    ['image/heic', 'image/heif'].includes(blob.type.toLowerCase()) ||
+    /\.(heic|heif)$/i.test(name) ||
+    ['heic', 'heif'].includes(format.toLowerCase());
+
+  const storeImage = async (input: Blob, name = '', format = '') => {
+    if (input.size > 15 * 1024 * 1024) {
       setToast('Please choose an image smaller than 15 MB');
       return;
     }
-    const objectUrl = URL.createObjectURL(file);
-    const image = new Image();
-    image.onload = () => {
+
+    setProcessingPhoto(true);
+    let objectUrl = '';
+    try {
+      // Samsung commonly stores gallery photos as HEIC/HEIF. Convert locally before
+      // browser decoding, then resize all formats to keep IndexedDB storage compact.
+      const converted = isHeifImage(input, name, format)
+        ? await heic2any({ blob: input, toType: 'image/jpeg', quality: 0.9 })
+        : input;
+      const imageBlob = Array.isArray(converted) ? converted[0] : converted;
+      objectUrl = URL.createObjectURL(imageBlob);
+      const image = new Image();
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error('Image decode failed'));
+        image.src = objectUrl;
+      });
       const maxEdge = 1400;
       const scale = Math.min(1, maxEdge / Math.max(image.width, image.height));
       const canvas = document.createElement('canvas');
       canvas.width = Math.round(image.width * scale);
       canvas.height = Math.round(image.height * scale);
-      canvas.getContext('2d')?.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Canvas is unavailable');
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
       const compressed = canvas.toDataURL('image/jpeg', 0.82);
-      URL.revokeObjectURL(objectUrl);
       setDraft((current) => ({ ...current, image: compressed }));
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      setToast('That image could not be read');
-    };
-    image.src = objectUrl;
+    } catch {
+      setToast('That photo could not be read. Try another HEIF, JPEG, or PNG image.');
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setProcessingPhoto(false);
+    }
+  };
+
+  const readImage = async (file?: File) => {
+    if (file) await storeImage(file, file.name);
+  };
+
+  const storeCameraResult = async (result?: MediaResult) => {
+    if (!result?.webPath) throw new Error('The selected photo has no readable path');
+    const response = await fetch(result.webPath);
+    if (!response.ok) throw new Error('The selected photo could not be opened');
+    const blob = await response.blob();
+    await storeImage(blob, '', result.metadata?.format ?? '');
+  };
+
+  const wasCameraCancelled = (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    return /cancel|canceled|cancelled|no image selected/i.test(message);
+  };
+
+  const takePicture = async () => {
+    if (!Capacitor.isNativePlatform()) {
+      cameraInput.current?.click();
+      return;
+    }
+    try {
+      const result = await Camera.takePhoto({
+        quality: 90,
+        targetWidth: 1600,
+        targetHeight: 1600,
+        correctOrientation: true,
+        encodingType: EncodingType.JPEG,
+        saveToGallery: false,
+        cameraDirection: CameraDirection.Rear,
+        includeMetadata: true,
+      });
+      await storeCameraResult(result);
+    } catch (error) {
+      if (!wasCameraCancelled(error)) setToast('The camera could not be opened');
+    }
+  };
+
+  const choosePicture = async () => {
+    if (!Capacitor.isNativePlatform()) {
+      galleryInput.current?.click();
+      return;
+    }
+    try {
+      const selection = await Camera.chooseFromGallery({
+        mediaType: MediaTypeSelection.Photo,
+        allowMultipleSelection: false,
+        includeMetadata: true,
+        quality: 90,
+        targetWidth: 1600,
+        targetHeight: 1600,
+        correctOrientation: true,
+      });
+      await storeCameraResult(selection.results[0]);
+    } catch (error) {
+      if (!wasCameraCancelled(error)) setToast('The photo picker could not be opened');
+    }
   };
 
   const pauseSuggestion: Record<string, string> = {
@@ -503,22 +611,45 @@ function App() {
         </button>
       </nav>
 
-      <IonModal isOpen={showEntry} onDidDismiss={() => setShowEntry(false)} breakpoints={[0, 0.96]} initialBreakpoint={0.96}>
+      <IonModal
+        isOpen={showEntry}
+        onDidDismiss={() => setShowEntry(false)}
+        backdropDismiss={false}
+        className="entry-modal"
+      >
         <div className="sheet entry-sheet">
-          <div className="sheet-handle" />
           <div className="sheet-header">
-            <button onClick={() => setShowEntry(false)} aria-label="Close"><IonIcon icon={close} /></button>
+            <button onClick={cancelEntry} aria-label="Cancel and discard entry"><IonIcon icon={close} /></button>
             <div><small>{editingEntryId ? 'Make a change' : 'Remember this moment'}</small><h2>{editingEntryId ? 'Edit entry' : 'What did you eat?'}</h2></div>
             <button className="save-link" onClick={saveEntry}>Save</button>
           </div>
           <div className="sheet-scroll">
-            <div className="photo-field" onClick={() => fileInput.current?.click()}>
+            <div className="photo-field">
               {draft.image ? <img src={draft.image} alt="Selected meal" /> : (
-                <div><IonIcon icon={cameraOutline} /><strong>Add a photo</strong><span>Choose from your device</span></div>
+                <div><IonIcon icon={cameraOutline} /><strong>Add a photo</strong><span>Take one now or choose from your device</span></div>
               )}
-              {draft.image && <button className="remove-photo" onClick={(event) => { event.stopPropagation(); setDraft((current) => ({ ...current, image: undefined })); }}><IonIcon icon={close} /></button>}
+              {processingPhoto && <div className="photo-processing">Preparing photo...</div>}
+              {draft.image && <button className="remove-photo" onClick={() => setDraft((current) => ({ ...current, image: undefined }))} aria-label="Remove photo"><IonIcon icon={close} /></button>}
             </div>
-            <input ref={fileInput} hidden type="file" accept="image/*" onChange={(event) => readImage(event.target.files?.[0])} />
+            <div className="photo-actions">
+              <button type="button" onClick={takePicture} disabled={processingPhoto}><IonIcon icon={cameraOutline} />Take photo</button>
+              <button type="button" onClick={choosePicture} disabled={processingPhoto}><IonIcon icon={imageOutline} />Choose photo</button>
+            </div>
+            <input
+              ref={cameraInput}
+              hidden
+              type="file"
+              accept="image/*,.heic,.heif,image/heic,image/heif"
+              capture="environment"
+              onChange={(event) => { void readImage(event.target.files?.[0]); event.currentTarget.value = ''; }}
+            />
+            <input
+              ref={galleryInput}
+              hidden
+              type="file"
+              accept="image/*,.heic,.heif,image/heic,image/heif"
+              onChange={(event) => { void readImage(event.target.files?.[0]); event.currentTarget.value = ''; }}
+            />
 
             <label className="field-label">Description</label>
             <textarea className="description-field" rows={3} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="e.g. Toast with avocado and eggs" />
