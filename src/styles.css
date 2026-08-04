@@ -94,7 +94,10 @@ body {
 .entry-time strong { font-size: 14px; }
 .entry-time span { margin-top: 5px; color: var(--path-muted); font-size: 10px; font-weight: 700; }
 .entry-card { grid-area: card; min-width: 0; overflow: hidden; background: white; border-radius: 25px; box-shadow: 0 18px 45px rgba(67,42,23,.11); }
-.entry-card > img { display: block; width: 100%; max-height: 390px; aspect-ratio: 4/4.3; object-fit: cover; }
+.entry-photo { width: 100%; max-height: 390px; aspect-ratio: 4/4.3; overflow: hidden; background: linear-gradient(135deg, #fff3e9, #f4eee9); }
+.entry-photo img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.entry-photo > span { display: block; width: 100%; height: 100%; background: radial-gradient(circle at 50% 45%, rgba(255,153,94,.16), transparent 38%); }
+.load-older-button { width: calc(100% - 82px); min-height: 48px; margin: 8px 0 8px 82px; border: 1px solid #eadfd6; border-radius: 16px; color: #a04b23; background: white; font-size: 13px; font-weight: 800; }
 .text-entry-art { min-height: 150px; display: grid; place-items: center; color: #dc6429; background: radial-gradient(circle at 30% 20%, #fff9d8, transparent 35%), linear-gradient(145deg, #ffefdf, #ffd8c1); }
 .text-entry-art ion-icon { padding: 20px; font-size: 52px; border-radius: 50%; background: rgba(255,255,255,.75); }
 .entry-body { padding: 17px 18px 19px; }
@@ -222,7 +225,7 @@ ion-modal.entry-modal { --width: 100%; --height: 96%; align-items: flex-end; }
   .topbar { border-radius: 0 0 25px 25px; }
   .timeline { padding-inline: 36px; }
   .entry-row { grid-template-columns: 40px 1fr 86px; gap: 20px; }
-  .entry-card > img { aspect-ratio: 1.25/1; }
+  .entry-photo { aspect-ratio: 1.25/1; }
   .empty-state { margin-inline: 40px; }
   ion-modal.entry-sheet { --width: min(94vw, 620px); --height: min(94vh, 880px); --border-radius: 30px; }
 }
@@ -241,7 +244,7 @@ ion-modal.entry-modal { --width: 100%; --height: 96%; align-items: flex-end; }
   .day-group::before { left: 29px; }
   .rail-dot { width: 36px; height: 36px; }
   .entry-card { border-radius: 22px; }
-  .entry-card > img { max-height: 360px; }
+  .entry-photo { max-height: 360px; }
   .bottom-nav { width: calc(100% - 20px); }
   .pattern-card { width: calc(100% - 30px); }
   .insight-list { grid-template-columns: 1fr; }

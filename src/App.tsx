@@ -10,6 +10,7 @@ import {
   IonToast,
 } from '@ionic/react';
 import { Camera, CameraDirection, EncodingType, MediaTypeSelection, type MediaResult } from '@capacitor/camera';
+import { App as CapacitorApp, type RestoredListenerEvent } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import heic2any from 'heic2any';
 import {
@@ -29,7 +30,7 @@ import {
   restaurantOutline,
   trashOutline,
 } from 'ionicons/icons';
-import { loadState, saveState } from './storage';
+import { clearPendingDraft, loadPendingDraft, loadState, savePendingDraft, saveState } from './storage';
 
 type PathStatus = 'on' | 'off';
 type PortionSize = 'Small' | 'Medium' | 'Large';
@@ -63,6 +64,14 @@ type StoredState = {
 };
 
 type EntryDraft = Omit<JournalEntry, 'id'>;
+
+type PendingEntryDraft = {
+  userId: string;
+  editingEntryId: string | null;
+  draft: EntryDraft;
+};
+
+const TIMELINE_PAGE_SIZE = 12;
 
 const moods = ['Calm', 'Happy', 'Stressed', 'Bored', 'Sad', 'Celebrating', 'Tired'];
 const places = ['Sitting at a table', 'On the sofa', 'Standing', 'At my desk', 'In the car', 'Out with others'];
@@ -133,6 +142,34 @@ const mostFrequent = (values: string[]) => {
   return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
 };
 
+function TimelinePhoto({ src, alt }: { src: string; alt: string }) {
+  const container = useRef<HTMLDivElement>(null);
+  const [nearViewport, setNearViewport] = useState(false);
+
+  useEffect(() => {
+    const element = container.current;
+    if (!element || !('IntersectionObserver' in window)) {
+      setNearViewport(true);
+      return;
+    }
+
+    // Mount only nearby bitmaps. Removing src after they move far away lets Android
+    // reclaim decoded-image memory while preserving the card's fixed layout.
+    const observer = new IntersectionObserver(
+      ([entry]) => setNearViewport(entry.isIntersecting),
+      { rootMargin: '700px 0px' },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div className="entry-photo" ref={container}>
+      {nearViewport ? <img src={src} alt={alt} loading="lazy" decoding="async" /> : <span aria-hidden="true" />}
+    </div>
+  );
+}
+
 function App() {
   const [state, setState] = useState<StoredState>({ activeUserId: null, users: [] });
   const [hydrated, setHydrated] = useState(false);
@@ -147,6 +184,8 @@ function App() {
   const [draft, setDraft] = useState<EntryDraft>(emptyDraft);
   const [entryDraftActive, setEntryDraftActive] = useState(false);
   const [processingPhoto, setProcessingPhoto] = useState(false);
+  const [visibleEntryCount, setVisibleEntryCount] = useState(TIMELINE_PAGE_SIZE);
+  const [restoredCameraResult, setRestoredCameraResult] = useState<MediaResult | null>(null);
   const [entryMenuId, setEntryMenuId] = useState<string | null>(null);
   const [deleteEntryId, setDeleteEntryId] = useState<string | null>(null);
   const [deleteUserId, setDeleteUserId] = useState<string | null>(null);
@@ -154,17 +193,28 @@ function App() {
   const [pauseReason, setPauseReason] = useState('Physically hungry');
   const [pauseEndsAt, setPauseEndsAt] = useState<number | null>(null);
   const [pauseRemaining, setPauseRemaining] = useState(600);
+  const journalContent = useRef<HTMLIonContentElement>(null);
   const cameraInput = useRef<HTMLInputElement>(null);
   const galleryInput = useRef<HTMLInputElement>(null);
 
   // Hydrate once, then normalize older entries as fields are added in newer releases.
   useEffect(() => {
-    loadState<StoredState>({ activeUserId: null, users: [] }).then((stored) => {
+    Promise.all([
+      loadState<StoredState>({ activeUserId: null, users: [] }),
+      loadPendingDraft<PendingEntryDraft>(),
+    ]).then(([stored, pending]) => {
       const normalized = {
         ...stored,
         users: stored.users.map((user) => ({ ...user, entries: user.entries.map(normalizeEntry) })),
       };
-      setState(normalized);
+      setState(pending && normalized.users.some((user) => user.id === pending.userId)
+        ? { ...normalized, activeUserId: pending.userId }
+        : normalized);
+      if (pending && normalized.users.some((user) => user.id === pending.userId)) {
+        setDraft({ ...emptyDraft(), ...pending.draft });
+        setEditingEntryId(pending.editingEntryId);
+        setEntryDraftActive(true);
+      }
       setShowUserForm(stored.users.length === 0);
       setHydrated(true);
     });
@@ -192,21 +242,65 @@ function App() {
   const activeUser = state.users.find((user) => user.id === state.activeUserId) ?? state.users[0] ?? null;
 
   useEffect(() => {
+    if (!hydrated) return;
+    if (!entryDraftActive || !activeUser) {
+      void clearPendingDraft();
+      return;
+    }
+    // Persist form fields separately so Android can safely recreate the WebView
+    // while the system camera owns the screen.
+    void savePendingDraft<PendingEntryDraft>({ userId: activeUser.id, editingEntryId, draft });
+  }, [activeUser?.id, draft, editingEntryId, entryDraftActive, hydrated]);
+
+  useEffect(() => {
     if (activeUser && state.activeUserId !== activeUser.id) {
       setState((current) => ({ ...current, activeUserId: activeUser.id }));
     }
   }, [activeUser, state.activeUserId]);
 
+  const sortedEntries = useMemo(
+    () => [...(activeUser?.entries ?? [])].sort((a, b) => +new Date(a.eatenAt) - +new Date(b.eatenAt)),
+    [activeUser],
+  );
+
   const groupedEntries = useMemo(() => {
     const groups = new Map<string, JournalEntry[]>();
-    [...(activeUser?.entries ?? [])]
-      .sort((a, b) => +new Date(b.eatenAt) - +new Date(a.eatenAt))
+    sortedEntries
+      .slice(Math.max(0, sortedEntries.length - visibleEntryCount))
       .forEach((entry) => {
         const key = formatDay(entry.eatenAt);
         groups.set(key, [...(groups.get(key) ?? []), entry]);
       });
     return [...groups.entries()];
-  }, [activeUser]);
+  }, [sortedEntries, visibleEntryCount]);
+
+  useEffect(() => setVisibleEntryCount(TIMELINE_PAGE_SIZE), [activeUser?.id]);
+
+  useEffect(() => {
+    if (!hydrated || !activeUser) return;
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      // Wait for Ionic's scroll element and the fixed-size photo placeholders to lay out.
+      secondFrame = window.requestAnimationFrame(() => { void journalContent.current?.scrollToBottom(0); });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
+  }, [activeUser?.id, activeUser?.entries.length, hydrated]);
+
+  const loadOlderEntries = async () => {
+    const scrollElement = await journalContent.current?.getScrollElement();
+    const previousHeight = scrollElement?.scrollHeight ?? 0;
+    const previousTop = scrollElement?.scrollTop ?? 0;
+    setVisibleEntryCount((count) => count + TIMELINE_PAGE_SIZE);
+
+    // Older cards are prepended. Offset by their added height so the entry the
+    // user was reading remains under their finger instead of jumping downward.
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      if (scrollElement) scrollElement.scrollTop = previousTop + scrollElement.scrollHeight - previousHeight;
+    }));
+  };
 
   const weeklyPatterns = useMemo(() => {
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -394,7 +488,9 @@ function App() {
         image.onerror = () => reject(new Error('Image decode failed'));
         image.src = objectUrl;
       });
-      const maxEdge = 1400;
+      // 900px is comfortably above the rendered card size while using much less
+      // storage and roughly 60% less decoded memory than the previous 1400px image.
+      const maxEdge = 900;
       const scale = Math.min(1, maxEdge / Math.max(image.width, image.height));
       const canvas = document.createElement('canvas');
       canvas.width = Math.round(image.width * scale);
@@ -402,7 +498,7 @@ function App() {
       const context = canvas.getContext('2d');
       if (!context) throw new Error('Canvas is unavailable');
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
-      const compressed = canvas.toDataURL('image/jpeg', 0.82);
+      const compressed = canvas.toDataURL('image/jpeg', 0.72);
       setDraft((current) => ({ ...current, image: compressed }));
     } catch {
       setToast('That photo could not be read. Try another HEIF, JPEG, or PNG image.');
@@ -435,10 +531,15 @@ function App() {
       return;
     }
     try {
+      if (activeUser) {
+        // Finish this write before leaving for the camera activity. Android may
+        // reclaim the WebView while the external camera is in front.
+        await savePendingDraft<PendingEntryDraft>({ userId: activeUser.id, editingEntryId, draft });
+      }
       const result = await Camera.takePhoto({
-        quality: 90,
-        targetWidth: 1600,
-        targetHeight: 1600,
+        quality: 75,
+        targetWidth: 1024,
+        targetHeight: 1024,
         correctOrientation: true,
         encodingType: EncodingType.JPEG,
         saveToGallery: false,
@@ -461,9 +562,9 @@ function App() {
         mediaType: MediaTypeSelection.Photo,
         allowMultipleSelection: false,
         includeMetadata: true,
-        quality: 90,
-        targetWidth: 1600,
-        targetHeight: 1600,
+        quality: 75,
+        targetWidth: 1024,
+        targetHeight: 1024,
         correctOrientation: true,
       });
       await storeCameraResult(selection.results[0]);
@@ -471,6 +572,27 @@ function App() {
       if (!wasCameraCancelled(error)) setToast('The photo picker could not be opened');
     }
   };
+
+  useEffect(() => {
+    const listener = CapacitorApp.addListener('appRestoredResult', (event: RestoredListenerEvent) => {
+      if (event.success && event.pluginId === 'Camera' && event.methodName === 'takePhoto' && event.data) {
+        setRestoredCameraResult(event.data as MediaResult);
+      }
+    });
+    return () => { void listener.then((handle) => handle.remove()); };
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated || !restoredCameraResult) return;
+    // Reopen the preserved draft and attach the result returned after Android
+    // recreated the app process while the system camera was open.
+    setEntryDraftActive(true);
+    setShowPause(false);
+    setShowEntry(true);
+    void storeCameraResult(restoredCameraResult)
+      .catch(() => setToast('The restored camera photo could not be read'))
+      .finally(() => setRestoredCameraResult(null));
+  }, [hydrated, restoredCameraResult]);
 
   const pauseSuggestion: Record<string, string> = {
     'Physically hungry': 'A planned, satisfying meal or snack may be exactly what you need.',
@@ -490,7 +612,7 @@ function App() {
 
   return (
     <IonApp>
-      <IonContent fullscreen className="journal-page">
+      <IonContent ref={journalContent} fullscreen className="journal-page">
         <main className="app-shell">
           <header className="topbar">
             <div className="brand" aria-label="Path food journal">
@@ -555,6 +677,11 @@ function App() {
                 <span className="pattern-arrow">›</span>
               </button>
               <div className="timeline">
+                {visibleEntryCount < sortedEntries.length && (
+                  <button className="load-older-button" onClick={() => { void loadOlderEntries(); }}>
+                    Load {Math.min(TIMELINE_PAGE_SIZE, sortedEntries.length - visibleEntryCount)} older entries
+                  </button>
+                )}
                 {groupedEntries.map(([day, entries]) => (
                   <section className="day-group" key={day}>
                     <div className="day-label"><span>{day}</span><i /></div>
@@ -566,7 +693,7 @@ function App() {
                           <span>{entry.path === 'on' ? 'Aligned' : 'Unplanned'}</span>
                         </div>
                         <div className="entry-card">
-                          {entry.image ? <img src={entry.image} alt={entry.description || 'Food journal entry'} /> : (
+                          {entry.image ? <TimelinePhoto src={entry.image} alt={entry.description || 'Food journal entry'} /> : (
                             <div className="text-entry-art"><IonIcon icon={fastFoodOutline} /></div>
                           )}
                           <div className="entry-body">
