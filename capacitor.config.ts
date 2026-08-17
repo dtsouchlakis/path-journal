@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.pathjournal.app',
-  appName: 'Path',
+  appName: 'Daymark',
   webDir: 'dist',
   server: { androidScheme: 'https' },
 };

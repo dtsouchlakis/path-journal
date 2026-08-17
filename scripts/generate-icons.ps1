@@ -3,96 +3,62 @@ Add-Type -AssemblyName System.Drawing
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $resourceRoot = Join-Path $projectRoot 'android\app\src\main\res'
-$orange = [System.Drawing.ColorTranslator]::FromHtml('#FF7A00')
-$cream = [System.Drawing.ColorTranslator]::FromHtml('#FFF7EF')
+$cobalt = [System.Drawing.ColorTranslator]::FromHtml('#3157D5')
+$sky = [System.Drawing.ColorTranslator]::FromHtml('#DCE9FF')
+$gold = [System.Drawing.ColorTranslator]::FromHtml('#D69B49')
 
 function New-Canvas([int]$width, [int]$height, [bool]$transparent) {
     $bitmap = New-Object System.Drawing.Bitmap($width, $height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
     $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-    if ($transparent) {
-        $graphics.Clear([System.Drawing.Color]::Transparent)
-    } else {
-        $graphics.Clear($cream)
-    }
-    return [PSCustomObject]@{
-        Bitmap = $bitmap
-        Graphics = $graphics
+    $graphics.Clear($(if ($transparent) { [System.Drawing.Color]::Transparent } else { $sky }))
+    return [PSCustomObject]@{ Bitmap = $bitmap; Graphics = $graphics }
+}
+
+function Draw-Daymark([System.Drawing.Graphics]$graphics, [float]$centerX, [float]$centerY, [float]$scale) {
+    $sunBrush = New-Object System.Drawing.SolidBrush($gold)
+    $horizonPen = New-Object System.Drawing.Pen($cobalt, [float]($scale * 0.075))
+    $horizonPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $horizonPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    try {
+        $sunSize = $scale * 0.20
+        $graphics.FillEllipse($sunBrush, $centerX - ($sunSize / 2), $centerY - ($scale * 0.30), $sunSize, $sunSize)
+        $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+        try {
+            $path.AddBezier($centerX - ($scale * 0.31), $centerY,
+                $centerX - ($scale * 0.23), $centerY + ($scale * 0.30),
+                $centerX + ($scale * 0.23), $centerY + ($scale * 0.30),
+                $centerX + ($scale * 0.31), $centerY)
+            $graphics.DrawPath($horizonPen, $path)
+        } finally { $path.Dispose() }
+    } finally {
+        $sunBrush.Dispose()
+        $horizonPen.Dispose()
     }
 }
 
-function Draw-Flower([System.Drawing.Graphics]$graphics, [float]$centerX, [float]$centerY, [float]$scale) {
-    $brush = New-Object System.Drawing.SolidBrush($orange)
+function Save-Icon([string]$path, [int]$size, [bool]$transparent) {
+    $canvas = New-Canvas $size $size $transparent
     try {
-        for ($index = 0; $index -lt 5; $index++) {
-            $state = $graphics.Save()
-            $graphics.TranslateTransform($centerX, $centerY)
-            $graphics.RotateTransform($index * 72)
-            $petal = [System.Drawing.RectangleF]::new(
-                [float](-0.105 * $scale),
-                [float](-0.45 * $scale),
-                [float](0.21 * $scale),
-                [float](0.36 * $scale)
-            )
-            $graphics.FillEllipse($brush, $petal)
-            $graphics.Restore($state)
-        }
-        $graphics.FillEllipse($brush, $centerX - (0.08 * $scale), $centerY - (0.08 * $scale), 0.16 * $scale, 0.16 * $scale)
+        Draw-Daymark $canvas.Graphics ($size / 2) ($size / 2) ($size * 0.58)
+        $canvas.Bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
     } finally {
-        $brush.Dispose()
-    }
-}
-
-function Save-LegacyIcon([string]$path, [int]$size, [bool]$round) {
-    $canvas = New-Canvas $size $size $round
-    $bitmap = $canvas.Bitmap
-    $graphics = $canvas.Graphics
-    try {
-        if ($round) {
-            $backgroundBrush = New-Object System.Drawing.SolidBrush($cream)
-            try { $graphics.FillEllipse($backgroundBrush, 0, 0, $size - 1, $size - 1) } finally { $backgroundBrush.Dispose() }
-        }
-        Draw-Flower $graphics ($size / 2) ($size / 2) ($size * 0.56)
-        $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
-    } finally {
-        $graphics.Dispose()
-        $bitmap.Dispose()
-    }
-}
-
-function Save-Foreground([string]$path, [int]$size) {
-    $canvas = New-Canvas $size $size $true
-    $bitmap = $canvas.Bitmap
-    $graphics = $canvas.Graphics
-    try {
-        Draw-Flower $graphics ($size / 2) ($size / 2) ($size * 0.46)
-        $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
-    } finally {
-        $graphics.Dispose()
-        $bitmap.Dispose()
+        $canvas.Graphics.Dispose()
+        $canvas.Bitmap.Dispose()
     }
 }
 
 function Save-Splash([string]$path) {
     $existing = [System.Drawing.Image]::FromFile($path)
-    try {
-        $width = $existing.Width
-        $height = $existing.Height
-    } finally {
-        $existing.Dispose()
-    }
+    try { $width = $existing.Width; $height = $existing.Height } finally { $existing.Dispose() }
     $canvas = New-Canvas $width $height $false
-    $bitmap = $canvas.Bitmap
-    $graphics = $canvas.Graphics
     try {
-        $flowerSize = [Math]::Min($width, $height) * 0.17
-        Draw-Flower $graphics ($width / 2) ($height / 2) $flowerSize
-        $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+        Draw-Daymark $canvas.Graphics ($width / 2) ($height / 2) ([Math]::Min($width, $height) * 0.18)
+        $canvas.Bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
     } finally {
-        $graphics.Dispose()
-        $bitmap.Dispose()
+        $canvas.Graphics.Dispose()
+        $canvas.Bitmap.Dispose()
     }
 }
 
@@ -106,13 +72,10 @@ $densities = @{
 
 foreach ($density in $densities.Keys) {
     $folder = Join-Path $resourceRoot "mipmap-$density"
-    Save-LegacyIcon (Join-Path $folder 'ic_launcher.png') $densities[$density].Legacy $false
-    Save-LegacyIcon (Join-Path $folder 'ic_launcher_round.png') $densities[$density].Legacy $true
-    Save-Foreground (Join-Path $folder 'ic_launcher_foreground.png') $densities[$density].Foreground
+    Save-Icon (Join-Path $folder 'ic_launcher.png') $densities[$density].Legacy $false
+    Save-Icon (Join-Path $folder 'ic_launcher_round.png') $densities[$density].Legacy $false
+    Save-Icon (Join-Path $folder 'ic_launcher_foreground.png') $densities[$density].Foreground $true
 }
 
-Get-ChildItem -Path $resourceRoot -Recurse -Filter 'splash.png' | ForEach-Object {
-    Save-Splash $_.FullName
-}
-
-Save-LegacyIcon (Join-Path $projectRoot 'public\app-icon-512.png') 512 $false
+Get-ChildItem -Path $resourceRoot -Recurse -Filter 'splash.png' | ForEach-Object { Save-Splash $_.FullName }
+Save-Icon (Join-Path $projectRoot 'public\app-icon-512.png') 512 $false
